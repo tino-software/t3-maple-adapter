@@ -31,12 +31,17 @@ function parseEnvFile(path: string): Record<string, string> {
 }
 
 /** OTEL-style `k=v,k2=v2`, values percent-decoded. */
-function parsePairs(raw: string | undefined): Record<string, string> {
+function parsePairs(name: string, raw: string | undefined): Record<string, string> {
   const out: Record<string, string> = {}
   for (const pair of (raw ?? "").split(",")) {
     const i = pair.indexOf("=")
     if (i <= 0) continue
-    out[pair.slice(0, i).trim()] = decodeURIComponent(pair.slice(i + 1).trim())
+    const key = pair.slice(0, i).trim()
+    try {
+      out[key] = decodeURIComponent(pair.slice(i + 1).trim())
+    } catch {
+      throw new Error(`${name}: value for "${key}" is not valid percent-encoding`)
+    }
   }
   return out
 }
@@ -57,8 +62,11 @@ export function loadConfig(): Config {
   const tracesUrl = env.T3_MAPLE_TRACES_URL ?? env.T3CODE_OTLP_TRACES_URL
   if (!tracesUrl)
     throw new Error(`No traces URL: set T3CODE_OTLP_TRACES_URL in ${otelEnvPath} or T3_MAPLE_TRACES_URL`)
-  const headers = parsePairs(env.T3_MAPLE_OTLP_HEADERS ?? env.T3CODE_OTLP_HEADERS)
-  const inherited = parsePairs(env.OTEL_RESOURCE_ATTRIBUTES)
+  // Headers come from the same place as the URL, so an overridden URL never receives T3's key.
+  const headers = env.T3_MAPLE_TRACES_URL
+    ? parsePairs("T3_MAPLE_OTLP_HEADERS", env.T3_MAPLE_OTLP_HEADERS)
+    : parsePairs("T3CODE_OTLP_HEADERS", env.T3CODE_OTLP_HEADERS)
+  const inherited = parsePairs("OTEL_RESOURCE_ATTRIBUTES", env.OTEL_RESOURCE_ATTRIBUTES)
   return {
     dbPath: env.T3_MAPLE_DB ?? join(T3_HOME, "statev2.sqlite"),
     statePath:

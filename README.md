@@ -65,7 +65,9 @@ Add `--dry-run` to `backfill` to map without exporting.
 
 `watch` starts at the current end of T3's event log the first time, so it exports nothing
 from the past. It stores its cursor and the ids of exported runs in a state file, and
-resumes from there after a restart. To export older turns, use `backfill`. `backfill` doesn't
+resumes from there after a restart. A turn is exported 60 seconds after it finishes, because T3
+can still update its items briefly after that. If an export fails (Maple down, a rejected key),
+the turn stays in the state file and is retried on each poll for about an hour. To export older turns, use `backfill`. `backfill` doesn't
 check the state file, so running it twice sends the same spans twice. The trace and span ids
 are deterministic, so they repeat too.
 
@@ -77,7 +79,7 @@ environment takes precedence.
 | Variable | Default | Purpose |
 |---|---|---|
 | `T3_MAPLE_TRACES_URL` | `T3CODE_OTLP_TRACES_URL` from `otel.env` | OTLP/HTTP traces endpoint |
-| `T3_MAPLE_OTLP_HEADERS` | `T3CODE_OTLP_HEADERS` from `otel.env` | `k=v,k2=v2`, values percent-encoded |
+| `T3_MAPLE_OTLP_HEADERS` | `T3CODE_OTLP_HEADERS` from `otel.env` | `k=v,k2=v2`, values percent-encoded. When `T3_MAPLE_TRACES_URL` is set, only this is used, so T3's key is never sent to a different endpoint |
 | `T3_MAPLE_CAPTURE_CONTENT` | `1` | `0` drops prompts, replies, reasoning and tool input/output. Only metadata is sent: timings, names, models, tokens, status |
 | `T3_MAPLE_MAX_CONTENT_CHARS` | `16000` | Clip each captured string to this length |
 | `T3_MAPLE_EXCLUDE_PROJECTS` | (none) | Comma-separated T3 project ids or titles that are never exported |
@@ -158,8 +160,11 @@ is global, resumable and needs no credentials.
 - **Model calls are reconstructed.** T3 doesn't store individual API calls. A `chat` span is
   a run of reasoning and assistant items plus the tool calls they emitted. Counts and order
   are right; durations are approximate.
-- **Usage is per turn**, not per call. Providers that report no usage (for example a
-  delegated Codex run with `usageStatus: unavailable`) export no token counts.
+- **Usage is per turn**, not per call. Partial usage is exported with
+  `t3.usage.status=partial`. Providers that report no usage (`usageStatus: unavailable`)
+  export no token counts.
+- **Waiting is counted as model time.** Time spent waiting on approvals or user input falls
+  inside a `chat` span. T3's `error` items aren't mapped yet.
 - **No cost**, system prompt, tool definitions or time to first token. T3 doesn't store them.
 - **Subagents are flat.** A `subagent` tool span carries the `childThreadId`, but the child
   thread exports as its own session, not nested under the parent trace.

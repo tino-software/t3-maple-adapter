@@ -75,3 +75,26 @@ test("content capture off drops transcript attributes", () => {
   const keys = spans.flatMap((s) => Object.keys(s.attributes))
   expect(keys.some((k) => k.startsWith("gen_ai.input") || k.startsWith("gen_ai.output") || k.startsWith("gen_ai.tool.call.a") || k.startsWith("gen_ai.tool.call.r"))).toBe(false)
 })
+
+test("partial usage is exported and marked; failed runs finish with error", () => {
+  const partial: Turn = {
+    ...turn,
+    run: { ...turn.run, status: "failed" },
+    providerTurns: [{ turnTokenUsage: { usageStatus: "partial", inputTokens: 5, outputTokens: 2 } }],
+  }
+  const spans = turnToSpans(partial, { captureContent: true, maxContentChars: 1000 })
+  const last = spans.filter((s) => s.attributes["gen_ai.operation.name"] === "chat").at(-1)!
+  expect(last.attributes["gen_ai.usage.input_tokens"]).toBe(5)
+  expect(last.attributes["t3.usage.status"]).toBe("partial")
+  expect(JSON.parse(spans[0]!.attributes["gen_ai.output.messages"] as string)[0].finish_reason).toBe("error")
+})
+
+test("start time never becomes Infinity when timestamps are missing", () => {
+  const bare: Turn = {
+    ...turn,
+    run: { ...turn.run, startedAt: null, requestedAt: null },
+    items: turn.items.map((i) => ({ ...i, startedAt: null })),
+  }
+  const spans = turnToSpans(bare, { captureContent: false, maxContentChars: 1000 })
+  expect(spans.every((s) => Number.isFinite(s.startMs) && Number.isFinite(s.endMs))).toBe(true)
+})

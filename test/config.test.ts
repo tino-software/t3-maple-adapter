@@ -41,3 +41,16 @@ test("rejects non-numeric poll interval", () => {
   process.env.T3_MAPLE_POLL_MS = "5s"
   expect(() => loadConfig()).toThrow("T3_MAPLE_POLL_MS")
 })
+
+test("an overridden traces URL never inherits T3's OTLP headers", () => {
+  base()
+  delete process.env.T3_MAPLE_OTLP_HEADERS
+  process.env.T3CODE_OTLP_HEADERS = "Authorization=Bearer%20t3-key"
+  expect(loadConfig().headers).toEqual({})
+})
+
+test("bad percent-encoding names the variable", () => {
+  base()
+  process.env.T3_MAPLE_OTLP_HEADERS = "Authorization=%E0%A4%A"
+  expect(() => loadConfig()).toThrow("T3_MAPLE_OTLP_HEADERS")
+})

@@ -37,19 +37,23 @@ export class Store {
     return row.s ?? 0
   }
 
-  /** Runs that reached a terminal status in (after, upTo]. */
+  /**
+   * Runs that reached a terminal status after `after`. Reads up to a fixed end sequence, so an
+   * event committed between the two queries is left for the next call instead of skipped.
+   */
   finishedRunsSince(after: number, limit = 5_000): { runIds: string[]; cursor: number } {
+    const end = Math.max(after, this.maxSequence())
     const rows = this.db
       .query(
         `SELECT sequence, json_extract(payload_json, '$.id') AS runId,
                 json_extract(payload_json, '$.status') AS status
            FROM orchestration_events
-          WHERE sequence > ? AND event_type = 'run.updated'
+          WHERE sequence > ? AND sequence <= ? AND event_type = 'run.updated'
           ORDER BY sequence LIMIT ?`,
       )
-      .all(after, limit) as Array<{ sequence: number; runId: string; status: string }>
+      .all(after, end, limit) as Array<{ sequence: number; runId: string; status: string }>
     const runIds = [...new Set(rows.filter((r) => TERMINAL_RUN_STATUSES.has(r.status)).map((r) => r.runId))]
-    const cursor = rows.length === limit ? rows.at(-1)!.sequence : Math.max(after, this.maxSequence())
+    const cursor = rows.length === limit ? rows.at(-1)!.sequence : end
     return { runIds, cursor }
   }
 

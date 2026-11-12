@@ -162,10 +162,10 @@ export function segment(items: ReadonlyArray<Json>, runStartMs: number): Segment
   return segments
 }
 
-function turnUsage(providerTurns: ReadonlyArray<Json>): Record<string, number> | undefined {
+function turnUsage(providerTurns: ReadonlyArray<Json>): Record<string, AttrValue> | undefined {
   const usages = providerTurns
     .map((t) => t.turnTokenUsage)
-    .filter((u) => u && u.usageStatus === "complete")
+    .filter((u) => u && (u.usageStatus === "complete" || u.usageStatus === "partial"))
   if (usages.length === 0) return undefined
   const sum = (key: string) => usages.reduce((n, u) => n + (Number(u[key]) || 0), 0)
   const out: Record<string, number> = {
@@ -175,7 +175,9 @@ function turnUsage(providerTurns: ReadonlyArray<Json>): Record<string, number> |
     "gen_ai.usage.cache_creation.input_tokens": sum("cacheCreationTokens"),
     "gen_ai.usage.reasoning.output_tokens": sum("reasoningTokens"),
   }
-  return Object.fromEntries(Object.entries(out).filter(([, v]) => v > 0))
+  const counts = Object.fromEntries(Object.entries(out).filter(([, v]) => v > 0))
+  const partial = usages.some((u) => u.usageStatus === "partial")
+  return { ...counts, ...(partial ? { "t3.usage.status": "partial" } : {}) }
 }
 
 const textMessage = (role: string, text: string) => ({ role, parts: [{ type: "text", content: text }] })
@@ -195,7 +197,9 @@ export function turnToSpans(turn: Turn, opts: MapOptions): SpanRecord[] {
   const traceId = hex(`t3-maple:trace:${run.id}`, 32)
   const rootId = hex(`t3-maple:span:${run.id}`, 16)
   const itemEnds = items.map((i) => ms(i.completedAt) ?? ms(i.updatedAt) ?? 0)
-  const startMs = ms(run.startedAt) ?? ms(run.requestedAt) ?? Math.min(...items.map((i) => ms(i.startedAt) ?? Infinity))
+  const firstItemStart = Math.min(...items.map((i) => ms(i.startedAt) ?? Infinity))
+  const startMs =
+    ms(run.startedAt) ?? ms(run.requestedAt) ?? (Number.isFinite(firstItemStart) ? firstItemStart : (ms(run.completedAt) ?? 0))
   const endMs = Math.max(startMs, ms(run.completedAt) ?? Math.max(startMs, ...itemEnds))
 
   const common: Record<string, AttrValue> = {
@@ -236,7 +240,7 @@ export function turnToSpans(turn: Turn, opts: MapOptions): SpanRecord[] {
         ? { "gen_ai.input.messages": json(userText.map((t) => textMessage("user", t))) }
         : {}),
       ...(opts.captureContent && finalText
-        ? { "gen_ai.output.messages": json([{ ...textMessage("assistant", finalText), finish_reason: "stop" }]) }
+        ? { "gen_ai.output.messages": json([{ ...textMessage("assistant", finalText), finish_reason: runFailed ? "error" : "stop" }]) }
         : {}),
     },
     status: runFailed ? { code: StatusCode.ERROR, message: "run failed" } : { code: StatusCode.UNSET },

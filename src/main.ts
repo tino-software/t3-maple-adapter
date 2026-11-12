@@ -5,10 +5,10 @@
 //   bun src/main.ts backfill --since 2h [--dry-run]
 //   bun src/main.ts watch                 # tail new turns, ad hoc (Ctrl-C to stop)
 //   bun src/main.ts show --run <runId>    # print mapped spans as JSON, no export
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path"
 import { parseArgs } from "node:util"
-import { Effect, Schedule } from "effect"
+import { Cause, Effect, Schedule } from "effect"
 import { describeConfig, loadConfig, type Config } from "./config"
 import { exportSpans } from "./otlp"
 import { turnToSpans, type SpanRecord } from "./spans"
@@ -17,23 +17,32 @@ import { Store } from "./store"
 interface State {
   cursor: number
   exported: string[]
-  /** Runs whose export failed or whose items weren't projected yet: run id -> attempts. */
+  /** Finished runs not exported yet (settling, or export failed): run id -> failed attempts. */
   pending?: Record<string, number>
 }
 
 const MAX_REMEMBERED_RUNS = 5_000
-const MAX_ATTEMPTS = 20
+/** Failed attempts before a run is dropped: about an hour at the default 5s poll. */
+const MAX_ATTEMPTS = 720
+/** T3 can still update a run's items shortly after it turns terminal; export once it is quiet. */
+const SETTLE_MS = 60_000
 
 function readState(path: string): State | undefined {
   if (!existsSync(path)) return undefined
-  return JSON.parse(readFileSync(path, "utf8"))
+  const state = JSON.parse(readFileSync(path, "utf8"))
+  if (!Number.isInteger(state?.cursor) || !Array.isArray(state?.exported))
+    throw new Error(`invalid state file ${path}: expected { cursor, exported }`)
+  return state
 }
 
+/** Write to a temp file and rename, so a crash never leaves truncated JSON. */
 function writeState(path: string, state: State) {
   mkdirSync(dirname(path), { recursive: true })
   const trimmed = { ...state, exported: state.exported.slice(-MAX_REMEMBERED_RUNS) }
-  writeFileSync(path, JSON.stringify(trimmed, null, 2), { mode: 0o600 })
-  chmodSync(path, 0o600)
+  const tmp = `${path}.tmp`
+  writeFileSync(tmp, JSON.stringify(trimmed, null, 2), { mode: 0o600 })
+  chmodSync(tmp, 0o600)
+  renameSync(tmp, path)
 }
 
 const summarize = (runId: string, spans: ReadonlyArray<SpanRecord>) => {
@@ -50,18 +59,33 @@ const summarize = (runId: string, spans: ReadonlyArray<SpanRecord>) => {
   ].join(" ")
 }
 
-type Outcome = "done" | "retry"
+type Outcome = "done" | "wait" | "retry"
 
-/** "done": exported, excluded, or dry-run. "retry": not projected yet, or the export failed. */
-const exportRuns = (store: Store, config: Config, runIds: ReadonlyArray<string>, dryRun: boolean) =>
+/**
+ * "done": exported, excluded, empty, or dry-run. "wait": finished less than settleMs ago.
+ * "retry": the run is missing, or reading, mapping or exporting it failed.
+ */
+const exportRuns = (
+  store: Store,
+  config: Config,
+  runIds: ReadonlyArray<string>,
+  opts: { dryRun: boolean; settleMs: number },
+) =>
   Effect.forEach(
     runIds,
     (runId) =>
       Effect.gen(function* () {
         const turn = store.loadTurn(runId)
-        if (!turn || turn.items.length === 0) {
-          yield* Effect.logInfo(`run ${runId} has no items yet`)
+        if (!turn) {
+          yield* Effect.logWarning(`run ${runId} not found`)
           return [runId, "retry"] as const
+        }
+        const finishedAt = Date.parse(turn.run.completedAt ?? turn.run.updatedAt ?? "")
+        if (opts.settleMs > 0 && Number.isFinite(finishedAt) && Date.now() - finishedAt < opts.settleMs)
+          return [runId, "wait"] as const
+        if (turn.items.length === 0) {
+          yield* Effect.logInfo(`run ${runId} has no items, nothing to export`)
+          return [runId, "done"] as const
         }
         const projectId: string = turn.thread.projectId ?? ""
         if (config.excludeProjects.has(projectId) || config.excludeProjects.has(store.projectTitle(projectId) ?? "")) {
@@ -69,14 +93,15 @@ const exportRuns = (store: Store, config: Config, runIds: ReadonlyArray<string>,
           return [runId, "done"] as const
         }
         const spans = turnToSpans(turn, config)
-        const result = dryRun ? undefined : yield* exportSpans(spans, config)
+        const result = opts.dryRun ? undefined : yield* exportSpans(spans, config)
         yield* Effect.logInfo(
           `${result ? `exported(${result.status}, ${result.accepted} spans)` : "dry-run"} ${summarize(runId, spans)}`,
         )
         return [runId, "done"] as const
       }).pipe(
-        Effect.catch((e) =>
-          Effect.logWarning(`run ${runId} failed: ${e.message}`).pipe(Effect.as([runId, "retry"] as const)),
+        // catchCause, not catch: SQLite and mapping errors are thrown synchronously and arrive as defects.
+        Effect.catchCause((cause) =>
+          Effect.logWarning(`run ${runId} failed: ${Cause.pretty(cause)}`).pipe(Effect.as([runId, "retry"] as const)),
         ),
       ),
     { concurrency: 1 },
@@ -92,6 +117,10 @@ const parseSince = (raw: string): string => {
 const watch = (store: Store, config: Config) =>
   Effect.gen(function* () {
     let state = readState(config.statePath) ?? { cursor: store.maxSequence(), exported: [] }
+    if (state.cursor > store.maxSequence())
+      yield* Effect.logWarning(
+        `state cursor ${state.cursor} is past the end of the event log (${store.maxSequence()}); was the T3 database replaced? Delete ${config.statePath} to restart from the end.`,
+      )
     writeState(config.statePath, state)
     yield* Effect.logInfo(`watching from sequence ${state.cursor} (${state.exported.length} runs already exported)`)
     const tick = Effect.gen(function* () {
@@ -99,12 +128,16 @@ const watch = (store: Store, config: Config) =>
       const pending = { ...state.pending }
       const exported = new Set(state.exported)
       const candidates = [...new Set([...Object.keys(pending), ...runIds])].filter((id) => !exported.has(id))
-      const outcomes = yield* exportRuns(store, config, candidates, false)
+      const outcomes = yield* exportRuns(store, config, candidates, { dryRun: false, settleMs: SETTLE_MS })
       const done: string[] = []
       for (const [runId, outcome] of outcomes) {
         if (outcome === "done") {
           done.push(runId)
           delete pending[runId]
+          continue
+        }
+        if (outcome === "wait") {
+          pending[runId] = pending[runId] ?? 0
           continue
         }
         const attempts = (pending[runId] ?? 0) + 1
@@ -118,7 +151,7 @@ const watch = (store: Store, config: Config) =>
       writeState(config.statePath, state)
     })
     yield* tick.pipe(
-      Effect.catch((e) => Effect.logWarning(`tick failed: ${String(e)}`)),
+      Effect.catchCause((cause) => Effect.logWarning(`tick failed: ${Cause.pretty(cause)}`)),
       Effect.repeat(Schedule.spaced(`${config.pollMs} millis`)),
     )
   })
@@ -139,11 +172,13 @@ const main = Effect.gen(function* () {
   switch (positionals[0]) {
     case "backfill": {
       const runIds = [
-        ...(values.thread ?? []).flatMap((t) => store.runIdsForThread(t)),
-        ...(values.since ? store.runIdsCompletedSince(parseSince(values.since)) : []),
+        ...new Set([
+          ...(values.thread ?? []).flatMap((t) => store.runIdsForThread(t)),
+          ...(values.since ? store.runIdsCompletedSince(parseSince(values.since)) : []),
+        ]),
       ]
       if (runIds.length === 0) return yield* Effect.logWarning("no runs matched")
-      const outcomes = yield* exportRuns(store, config, runIds, values["dry-run"]!)
+      const outcomes = yield* exportRuns(store, config, runIds, { dryRun: values["dry-run"]!, settleMs: 0 })
       const done = [...outcomes.values()].filter((o) => o === "done").length
       yield* Effect.logInfo(`${done}/${runIds.length} runs ${values["dry-run"] ? "mapped" : "exported"}`)
       return

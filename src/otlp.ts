@@ -56,6 +56,7 @@ export const exportSpans = (spans: ReadonlyArray<SpanRecord>, config: Config) =>
         method: "POST",
         headers: { ...config.headers, "content-type": "application/x-protobuf" },
         body: encode(spans, config),
+        signal: AbortSignal.timeout(30_000),
       })
       if (!response.ok) {
         const text = (await response.text()).slice(0, 300)
