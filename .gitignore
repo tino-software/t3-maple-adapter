@@ -1,0 +1,27 @@
+node_modules
+out
+dist
+*.tgz
+coverage
+*.lcov
+
+# secrets and local config (keep .env.example)
+.env
+.env.*
+!.env.example
+otel.env
+
+# runtime state and logs
+state.json
+*.log
+logs
+
+# machine-specific files
+.transfer/
+launchd/*.plist
+!launchd/example.plist
+
+.cache
+*.tsbuildinfo
+.idea
+.DS_Store

@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Example LaunchAgent for `bun src/main.ts watch`.
+  launchd does not expand $HOME or ~, so replace __HOME__ and __REPO__ first (see README).
+  Keep your Maple key in ~/.t3/userdata/otel.env, not in this file.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.t3-maple-adapter</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__HOME__/.bun/bin/bun</string>
+        <string>src/main.ts</string>
+        <string>watch</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>__REPO__</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>__HOME__</string>
+        <key>PATH</key>
+        <string>__HOME__/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>T3_MAPLE_HOST</key>
+        <string>my-laptop</string>
+        <key>T3_MAPLE_EXCLUDE_PROJECTS</key>
+        <string>client-project,another-private-project</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/t3-maple-adapter/stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/t3-maple-adapter/stderr.log</string>
+</dict>
+</plist>
